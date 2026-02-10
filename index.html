@@ -554,6 +554,7 @@
                         <button onclick="switchLeadsTab('insurance')" class="leads-tab px-4 py-2 rounded-lg text-sm font-bold bg-slate-800 text-slate-400 hover:bg-slate-700 border border-transparent whitespace-nowrap">Insurance</button>
                         <button onclick="switchLeadsTab('banks')" class="leads-tab px-4 py-2 rounded-lg text-sm font-bold bg-slate-800 text-slate-400 hover:bg-slate-700 border border-transparent whitespace-nowrap">Banks</button>
                         <button onclick="switchLeadsTab('colleges')" class="leads-tab px-4 py-2 rounded-lg text-sm font-bold bg-slate-800 text-slate-400 hover:bg-slate-700 border border-transparent whitespace-nowrap">Colleges</button>
+                        <button onclick="switchLeadsTab('clubs')" class="leads-tab px-4 py-2 rounded-lg text-sm font-bold bg-slate-800 text-slate-400 hover:bg-slate-700 border border-transparent whitespace-nowrap">Clubs</button>
                     </div>
 
                     <!-- Leads Table -->
@@ -612,7 +613,14 @@
 
                 <!-- Step 2: Results List -->
                 <div id="modal-step-2" class="hidden animate-fade-in-up">
-                    <h4 class="text-xs font-bold text-slate-500 uppercase mb-4">Found Profiles</h4>
+                    <div class="flex items-center justify-between mb-4">
+                        <h4 class="text-xs font-bold text-slate-500 uppercase">Found Profiles</h4>
+                        <div class="flex items-center gap-2">
+                            <button id="export-leaders-btn" onclick="exportLeaders()" class="text-xs bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded transition hidden">
+                                Export CSV
+                            </button>
+                        </div>
+                    </div>
                     <div id="leadership-results" class="space-y-3 max-h-60 overflow-y-auto pr-2">
                         <!-- Cards Injected -->
                     </div>
@@ -623,8 +631,15 @@
                     <!-- Selected Person Info -->
                     <div class="bg-slate-800 rounded-lg p-4 border border-white/5">
                         <div class="text-xs text-gray-400 mb-2">Selected Person</div>
-                        <div class="font-bold text-lg" id="res-name">-</div>
-                        <div class="text-sm text-blue-400" id="res-role">-</div>
+                        <div class="flex justify-between items-center mb-2">
+                            <div>
+                                <div class="font-bold text-lg" id="res-name">-</div>
+                                <div class="text-sm text-blue-400" id="res-role">-</div>
+                            </div>
+                            <div class="flex gap-2">
+                                <button onclick="resetModalStep(2)" class="text-xs bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded transition">Back</button>
+                            </div>
+                        </div>
                         <a id="res-linkedin" href="#" target="_blank" class="text-xs text-emerald-400 hover:underline">
                             <i class="fab fa-linkedin mr-1"></i>View LinkedIn
                         </a>
@@ -657,6 +672,7 @@
                                 class="w-full bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded text-sm transition shadow-lg shadow-emerald-900/20">
                             <i class="fas fa-address-card mr-2"></i>Get Both (2 credits)
                         </button>
+                        <div class="text-center text-xs text-slate-400 mt-2">Press <strong>Back</strong> to return to the list.</div>
                     </div>
 
                     <!-- Loading State -->
@@ -1419,8 +1435,8 @@
                     return; // hideLoader will be called in finally block
                 }
                 
-                const keywords = ['industry', 'insurance agency', 'bank', 'college'];
-                const keyNames = ['industries', 'insurance', 'banks', 'colleges'];
+                const keywords = ['industry', 'insurance agency', 'bank', 'college', 'club gymkhana'];
+                const keyNames = ['industries', 'insurance', 'banks', 'colleges', 'clubs'];
                 state.leadsData = {};
                 
                 console.log(`API URL: ${state.apiUrl}, Coordinates: ${lat}, ${lng}`);
@@ -1440,31 +1456,67 @@
                             console.error(`Invalid data format for ${keyNames[i]}:`, placesData);
                             state.leadsData[keyNames[i]] = [];
                         } else {
-                            // Group places by company name
+                            // Group places by company name, handling agent patterns
                             const companiesMap = new Map();
                             
+                            // Helper to extract parent company from agent names
+                            // e.g., "HDFC ERGO Insurance Agent: Raj Viren Parekh" -> "HDFC ERGO"
+                            function extractParentCompany(name) {
+                                const agentPatterns = [
+                                    /^(.+?)\s+(?:Insurance\s+)?Agent\s*[:\-]\s*(.+)$/i,
+                                    /^(.+?)\s+(?:Insurance\s+)?Advisor\s*[:\-]\s*(.+)$/i,
+                                    /^(.+?)\s+Representative\s*[:\-]\s*(.+)$/i,
+                                ];
+                                for (const pattern of agentPatterns) {
+                                    const match = name.match(pattern);
+                                    if (match) {
+                                        return { parent: match[1].trim(), agent: match[2].trim() };
+                                    }
+                                }
+                                return null;
+                            }
+                            
                             placesData.forEach(place => {
-                                const name = place.name;
-                                if (!companiesMap.has(name)) {
-                                    companiesMap.set(name, {
-                                        name: name,
+                                const originalName = place.name;
+                                const agentInfo = extractParentCompany(originalName);
+                                
+                                let companyKey, displayName, agentName;
+                                if (agentInfo) {
+                                    companyKey = agentInfo.parent;
+                                    displayName = agentInfo.parent;
+                                    agentName = agentInfo.agent;
+                                } else {
+                                    companyKey = originalName;
+                                    displayName = originalName;
+                                    agentName = null;
+                                }
+                                
+                                if (!companiesMap.has(companyKey)) {
+                                    companiesMap.set(companyKey, {
+                                        name: displayName,
                                         category: keyNames[i],
                                         locations: [],
+                                        agents: [],
                                         location_count: 0,
                                         closest_dist: Infinity,
                                         avg_rating: 'N/A'
                                     });
                                 }
                                 
-                                const company = companiesMap.get(name);
+                                const company = companiesMap.get(companyKey);
                                 company.locations.push({
                                     address: place.address,
                                     dist: place.dist,
                                     rating: place.rating,
                                     lat: place.lat,
                                     lng: place.lng,
-                                    place_id: place.place_id
+                                    place_id: place.place_id,
+                                    agent: agentName,
+                                    originalName: originalName
                                 });
+                                if (agentName && !company.agents.includes(agentName)) {
+                                    company.agents.push(agentName);
+                                }
                             });
                             
                             // Calculate stats for each company
@@ -1568,7 +1620,9 @@
                 const uniqueId = `${currentCategory}-${index}`;
                 
                 const row = document.createElement('tr');
-                const isExpandable = company.location_count > 1;
+                const hasMultipleLocations = company.location_count > 1;
+                const hasAgents = company.agents && company.agents.length > 0;
+                const isExpandable = hasMultipleLocations || hasAgents;
                 row.className = `hover:bg-white/5 transition ${isExpandable ? 'cursor-pointer' : ''}`;
                 
                 // Get the first location's address (or try to get from company data)
@@ -1576,12 +1630,21 @@
                     ? company.locations[0].address 
                     : 'Address not available';
                 
+                // Build info badges
+                let infoBadges = '';
+                if (hasMultipleLocations) {
+                    infoBadges += `<span class="text-xs text-slate-500 ml-2">(${company.location_count} branches)</span>`;
+                }
+                if (hasAgents) {
+                    infoBadges += `<span class="text-xs text-purple-400 ml-2"><i class="fas fa-user-tag mr-1"></i>${company.agents.length} agent${company.agents.length > 1 ? 's' : ''}</span>`;
+                }
+                
                 row.innerHTML = `
                     <td class="p-4">
                         <div class="flex items-center gap-2">
                             ${isExpandable ? `<i class="fas fa-chevron-right text-slate-500 transition-transform duration-200" id="chevron-${uniqueId}"></i>` : '<span class="w-4"></span>'}
                             <span class="font-semibold text-white">${company.name}</span>
-                            ${isExpandable ? `<span class="text-xs text-slate-500 ml-2">(${company.location_count} branches)</span>` : ''}
+                            ${infoBadges}
                         </div>
                     </td>
                     <td class="p-4 text-slate-300">${displayAddress}</td>
@@ -1599,44 +1662,78 @@
                     </td>
                 `;
                 
-                // Only show dropdown for companies with multiple locations
-                if (company.location_count > 1) {
+                // Only show dropdown for companies with multiple locations or agents
+                if (isExpandable) {
                     row.onclick = () => toggleLocations(uniqueId);
                     row.style.cursor = 'pointer';
                 }
                 tbody.appendChild(row);
                 
-                // Only create locations row if company has more than one location
-                if (company.location_count > 1) {
+                // Create expandable section if needed
+                if (isExpandable) {
                     const locationsRow = document.createElement('tr');
                     locationsRow.id = `locations-${uniqueId}`;
                     locationsRow.className = 'hidden bg-slate-800/30';
                     
-                    const locationsHTML = (company.locations || []).map((loc, locIdx) => {
-                        return `
-                            <div class="flex items-center justify-between p-3 bg-slate-900/50 rounded-lg border border-white/5 hover:border-emerald-500/30 transition">
-                                <div class="flex-1">
-                                    <div class="text-sm text-slate-300 mb-1">
-                                        <i class="fas fa-map-marker-alt text-emerald-500 mr-2"></i>${loc.address || 'Address not available'}
-                                    </div>
-                                    <div class="text-xs text-slate-500">
-                                        ${loc.dist !== undefined && loc.dist !== null ? `${loc.dist} km away` : 'Distance not available'}
-                                        ${loc.rating !== 'N/A' && loc.rating !== undefined && loc.rating !== null ? `• <span class="text-yellow-400"><i class="fas fa-star"></i> ${loc.rating}</span>` : ''}
-                                    </div>
+                    let expandedContent = '';
+                    
+                    // Show agents section if there are agents
+                    if (hasAgents) {
+                        const agentsHTML = company.agents.map((agent, agentIdx) => `
+                            <div class="inline-flex items-center gap-2 p-2 bg-purple-900/30 rounded-lg border border-purple-500/20 hover:border-purple-500/50 transition">
+                                <i class="fas fa-user-tag text-purple-400"></i>
+                                <span class="text-sm text-white">${agent}</span>
+                            </div>
+                        `).join('');
+                        
+                        expandedContent += `
+                            <div class="mb-4">
+                                <div class="text-xs text-purple-400 font-bold uppercase mb-2"><i class="fas fa-users mr-1"></i>Agents</div>
+                                <div class="flex flex-wrap gap-2">
+                                    ${agentsHTML}
                                 </div>
-                                <a href="https://www.google.com/maps/search/?api=1&query=${loc.lat},${loc.lng}${loc.place_id ? `&query_place_id=${loc.place_id}` : ''}" 
-                                target="_blank"
-                                class="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded transition ml-4">
-                                    <i class="fas fa-map mr-1"></i>Map
-                                </a>
                             </div>
                         `;
-                    }).join('');
+                    }
+                    
+                    // Show locations if multiple
+                    if (hasMultipleLocations) {
+                        const locationsHTML = (company.locations || []).map((loc, locIdx) => {
+                            const agentBadge = loc.agent ? `<span class="text-xs text-purple-400 ml-2"><i class="fas fa-user-tag mr-1"></i>${loc.agent}</span>` : '';
+                            return `
+                                <div class="flex items-center justify-between p-3 bg-slate-900/50 rounded-lg border border-white/5 hover:border-emerald-500/30 transition">
+                                    <div class="flex-1">
+                                        <div class="text-sm text-slate-300 mb-1">
+                                            <i class="fas fa-map-marker-alt text-emerald-500 mr-2"></i>${loc.address || 'Address not available'}${agentBadge}
+                                        </div>
+                                        <div class="text-xs text-slate-500">
+                                            ${loc.dist !== undefined && loc.dist !== null ? `${loc.dist} km away` : 'Distance not available'}
+                                            ${loc.rating !== 'N/A' && loc.rating !== undefined && loc.rating !== null ? `• <span class="text-yellow-400"><i class="fas fa-star"></i> ${loc.rating}</span>` : ''}
+                                        </div>
+                                    </div>
+                                    <a href="https://www.google.com/maps/search/?api=1&query=${loc.lat},${loc.lng}${loc.place_id ? `&query_place_id=${loc.place_id}` : ''}" 
+                                    target="_blank"
+                                    class="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded transition ml-4">
+                                        <i class="fas fa-map mr-1"></i>Map
+                                    </a>
+                                </div>
+                            `;
+                        }).join('');
+                        
+                        expandedContent += `
+                            <div>
+                                <div class="text-xs text-emerald-400 font-bold uppercase mb-2"><i class="fas fa-map-marker-alt mr-1"></i>Locations</div>
+                                <div class="space-y-2">
+                                    ${locationsHTML}
+                                </div>
+                            </div>
+                        `;
+                    }
                     
                     locationsRow.innerHTML = `
                         <td colspan="5" class="p-0">
-                            <div class="p-4 space-y-2">
-                                ${locationsHTML}
+                            <div class="p-4">
+                                ${expandedContent}
                             </div>
                         </td>
                     `;
@@ -1763,6 +1860,9 @@
                     return;
                 }
 
+                // Save leaders to state for export and later reference
+                state.lastLeaders = leaders;
+                document.getElementById('export-leaders-btn').classList.remove('hidden');
                 const container = document.getElementById('leadership-results');
                 const cardBgClass = isDarkMode ? 'bg-slate-800' : 'bg-gray-100';
                 const textClass = isDarkMode ? 'text-white' : 'text-gray-900';
@@ -1829,35 +1929,46 @@
 
         function selectLeadership(name, title, linkedin) {
             console.log('selectLeadership called with:', {name, title, linkedin});
-            
+
             if (!state.currentLead) {
                 console.error('No current lead set!');
                 alert('Error: No company selected');
                 return;
             }
-            
-            state.currentLead.person = { name, title, linkedin };
+
+            // Normalize linkedin values - treat 'null'/'None'/'undefined' as missing
+            let normalizedLinkedin = linkedin;
+            if (!normalizedLinkedin || String(normalizedLinkedin).toLowerCase() === 'null' || String(normalizedLinkedin).toLowerCase() === 'none' || String(normalizedLinkedin).toLowerCase() === 'undefined') {
+                normalizedLinkedin = null;
+            }
+
+            state.currentLead.person = { name, title, linkedin: normalizedLinkedin, linkedinLookupAttempted: false };
             console.log('Updated currentLead:', state.currentLead);
-            
+
             document.getElementById('res-name').textContent = name;
             document.getElementById('res-role').textContent = title;
-            
+
             const linkedinLink = document.getElementById('res-linkedin');
-            linkedinLink.href = linkedin.startsWith('http') ? linkedin : "https://" + linkedin;
-            linkedinLink.textContent = linkedin;
-            
+            if (normalizedLinkedin) {
+                linkedinLink.href = normalizedLinkedin.startsWith('http') ? normalizedLinkedin : "https://" + normalizedLinkedin;
+                linkedinLink.textContent = normalizedLinkedin;
+            } else {
+                linkedinLink.href = '#';
+                linkedinLink.textContent = 'Not available';
+            }
+
             // Update credit display
             document.getElementById('email-credits-count').textContent = userCredits.email_credits || 0;
             document.getElementById('phone-credits-count').textContent = userCredits.phone_credits || 0;
-            
+
             // Hide contact data and show credit warning buttons
             document.getElementById('contact-data').classList.add('hidden');
             document.getElementById('contact-loading').classList.add('hidden');
             document.getElementById('credit-warning-section').classList.remove('hidden');
 
-            console.log('About to reset to step 3');
+            // Always show a Back button to go back to results
             resetModalStep(3);
-            console.log('Reset to step 3 complete');
+            // Ensure there's an easy back control visible (we also add a small button in the footer)
         }
 
         // New function with credit confirmation
@@ -1896,36 +2007,91 @@
             document.getElementById('contact-loading').classList.remove('hidden');
 
             try {
-                if (!state.currentLead?.person?.linkedin) {
-                    throw new Error('No LinkedIn URL available for this person');
-                }
-                
-                const fetchEmail = requestType === 'email' || requestType === 'both';
-                const fetchPhone = requestType === 'phone' || requestType === 'both';
-                
-                console.log('Fetching from API:', {
-                    linkedin_url: state.currentLead.person.linkedin,
-                    fetch_email: fetchEmail,
-                    fetch_phone: fetchPhone
-                });
-                
-                const res = await fetch(`${state.apiUrl}/api/contactout`, {
-                    method: "POST",
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ 
-                        linkedin_url: state.currentLead.person.linkedin,
-                        fetch_email: fetchEmail,
-                        fetch_phone: fetchPhone
-                    })
-                });
+                    const person = state.currentLead?.person;
+                    let linkedinUrl = person?.linkedin;
+                    const fetchEmail = requestType === 'email' || requestType === 'both';
+                    const fetchPhone = requestType === 'phone' || requestType === 'both';
+
+                    // If linkedin missing, try resolving it via AI/web before contacting ContactOut
+                    if (person && (!linkedinUrl || String(linkedinUrl).toLowerCase() === 'null' || String(linkedinUrl).toLowerCase() === 'none' || String(linkedinUrl).toLowerCase() === 'undefined') && !person.linkedinLookupAttempted) {
+                        try {
+                            person.linkedinLookupAttempted = true;
+                            const resolveRes = await fetch(`${state.apiUrl}/api/resolve_linkedin`, {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    name: state.currentLead.person?.name || '',
+                                    title: state.currentLead.person?.title || '',
+                                    company: state.currentLead.company?.name || state.currentLead.name || ''
+                                })
+                            });
+
+                            if (resolveRes.ok) {
+                                const jr = await resolveRes.json();
+                                if (jr && jr.linkedin) {
+                                    linkedinUrl = jr.linkedin;
+                                    person.linkedin = linkedinUrl;
+                                    const linkedinLink = document.getElementById('res-linkedin');
+                                    linkedinLink.href = linkedinUrl.startsWith('http') ? linkedinUrl : `https://${linkedinUrl}`;
+                                    linkedinLink.textContent = linkedinUrl;
+                                    console.log('Resolved LinkedIn URL via resolver:', linkedinUrl);
+                                }
+                            } else {
+                                console.warn('LinkedIn resolver failed', resolveRes.status);
+                            }
+                        } catch (e) {
+                            console.warn('LinkedIn resolver error', e);
+                        }
+                    }
+
+                    // Build request payload: prefer linkedin_url, otherwise send name/title/company for backend search
+                    const payload = { fetch_email: fetchEmail, fetch_phone: fetchPhone };
+                    if (linkedinUrl && String(linkedinUrl).toLowerCase() !== 'null' && String(linkedinUrl).toLowerCase() !== 'none' && String(linkedinUrl).toLowerCase() !== 'undefined') {
+                        payload.linkedin_url = linkedinUrl;
+                    } else {
+                        // send name/title/company so backend can try ContactOut search as last resort
+                        payload.name = state.currentLead.person?.name || '';
+                        payload.title = state.currentLead.person?.title || '';
+                        payload.company = state.currentLead.company?.name || state.currentLead.name || '';
+                    }
+
+                    console.log('Fetching from API with payload:', payload);
+
+                    const res = await fetch(`${state.apiUrl}/api/contactout`, {
+                        method: "POST",
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(payload)
+                    });
                 
                 if (!res.ok) {
-                    const error = await res.json();
-                    throw new Error(error.detail || 'Failed to fetch contact details');
+                    const error = await res.json().catch(() => ({}));
+                    const errorMsg = error.detail || 'Contact not found';
+                    // Show friendly message instead of throwing for 404
+                    if (res.status === 404) {
+                        alert(`⚠️ ${errorMsg}\n\nThis person's contact details are not available in ContactOut.`);
+                        document.getElementById('credit-warning-section').classList.remove('hidden');
+                        document.getElementById('contact-loading').classList.add('hidden');
+                        return;
+                    }
+                    throw new Error(errorMsg);
                 }
                 
                 const data = await res.json();
                 console.log('Contact data received:', data);
+
+                // Merge returned contact info into cached leaders (for export)
+                try {
+                    if (state.lastLeaders && Array.isArray(state.lastLeaders) && state.currentLead && state.currentLead.person) {
+                        const personName = state.currentLead.person.name;
+                        const found = state.lastLeaders.find(l => l.name === personName);
+                        if (found) {
+                            if (data.email) found.email = data.email;
+                            if (data.phone) found.phone = data.phone;
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Failed to merge contact into lastLeaders', e);
+                }
 
                 // Update displays
                 if (data.email) {
@@ -1968,6 +2134,40 @@
 
         // Initialize credits on page load
         window.addEventListener('DOMContentLoaded', fetchCredits);
+
+        // --- Export Leaders ---
+        function exportLeaders() {
+            const leaders = state.lastLeaders || [];
+            if (!leaders || leaders.length === 0) {
+                alert('No leaders to export');
+                return;
+            }
+
+            const rows = [];
+            rows.push(['Name', 'Title', 'LinkedIn', 'Email', 'Phone']);
+            leaders.forEach(l => {
+                const name = l.name || '';
+                const title = l.title || '';
+                const linkedin = l.linkedin && String(l.linkedin).toLowerCase() !== 'null' ? l.linkedin : '';
+                // Attempt to use contact info if present on leader object
+                const email = l.email || '';
+                const phone = l.phone || '';
+                rows.push([name, title, linkedin, email, phone]);
+            });
+
+            const csvContent = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `leaders_export_${Date.now()}.csv`;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => {
+                URL.revokeObjectURL(url);
+                a.remove();
+            }, 5000);
+        }
     </script>
 </body>
 </html>

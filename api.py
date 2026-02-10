@@ -328,8 +328,76 @@ def create_occupation_visualization(filtered_data, gender, worker_type):
 
 
 import requests
+import re
 from bs4 import BeautifulSoup
 from duckduckgo_search import DDGS
+
+def clean_company_name_for_search(company_name: str) -> str:
+    """
+    Clean company name by removing branch/location info to get parent company.
+    e.g. 'Bank of Baroda Andheri(West) Branch' -> 'Bank of Baroda'
+    e.g. 'Bank of Maharashtra - Mumbai-Andheri, Seepz' -> 'Bank of Maharashtra'
+    """
+    name = company_name.strip()
+    # Remove branch/location patterns (order matters - try more specific first)
+    patterns = [
+        r'\s+[A-Za-z]+\s*\([^)]+\)\s*Branch$',  # "Andheri(West) Branch"
+        r'\s+Branch$',                            # "Branch"
+        r'\s*\([^)]+\)\s*$',                      # "(anything)"
+        r'\s+-\s+.+$',                            # " - anything" (dash separator)
+        r',\s+.+$',                               # ", anything" (comma separator)
+        r'\s+ATM$',
+        r'\s+Office$',
+    ]
+    for pattern in patterns:
+        name = re.sub(pattern, '', name, flags=re.IGNORECASE)
+    # Also strip common suffixes that may remain
+    suffixes = [' Ltd.', ' Ltd', ' Limited', ' Pvt. Ltd.', ' Pvt Ltd', ' (India)', ' India']
+    for suffix in suffixes:
+        if name.endswith(suffix):
+            name = name[:-len(suffix)].strip()
+    return name.strip()
+
+def search_linkedin_url(person_name: str, company_name: str = '') -> str:
+    """
+    Search for a person's LinkedIn URL.
+    Try ContactOut first (reliable), then DDGS as backup.
+    """
+    if not person_name:
+        return ''
+    
+    # Method 1: Try ContactOut search (most reliable)
+    if CONTACTOUT_API_KEY:
+        try:
+            linkedin_url = search_contactout_person(name=person_name, company=company_name)
+            if linkedin_url:
+                print(f"  Found via ContactOut: {linkedin_url}")
+                return linkedin_url
+        except Exception as e:
+            print(f"ContactOut search error for {person_name}: {e}")
+    
+    # Method 2: Try DDGS (may timeout)
+    try:
+        query = f'"{person_name}" site:linkedin.com/in'
+        if company_name:
+            query = f'"{person_name}" "{company_name}" site:linkedin.com/in'
+        
+        with DDGS() as ddgs:
+            try:
+                results = list(ddgs.text(query, max_results=3))
+                for r in results:
+                    url = r.get('href', '')
+                    if url and 'linkedin.com/in/' in url:
+                        if '?' in url:
+                            url = url.split('?')[0]
+                        return url
+            except Exception as e:
+                print(f"DDGS timeout for {person_name}")
+                    
+    except Exception as e:
+        print(f"LinkedIn search error: {e}")
+    
+    return ''
 
 def get_web_context(company_name: str):
     """
@@ -457,25 +525,47 @@ async def get_nearby_places(lat: float, lng: float, keyword: str):
         url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
         params = {
             "location": f"{lat},{lng}",
-            "radius": 5000,  # 5km radius
+            "radius": 10000,  # 10km radius
             "keyword": keyword,
             "key": GOOGLE_PLACES_API_KEY
         }
         
         print(f"Calling Google Places API with params: {params}")
         
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+        all_results = []
+        page_count = 0
+        max_pages = 3  # Google allows up to 3 pages (60 results)
         
-        print(f"Google API response status: {data.get('status')}")
+        while page_count < max_pages:
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            print(f"Google API response status: {data.get('status')}, page {page_count + 1}")
+            
+            if data.get('status') != 'OK' and data.get('status') != 'ZERO_RESULTS':
+                print(f"Google API error: {data.get('error_message', 'Unknown error')}")
+                break
+            
+            all_results.extend(data.get('results', []))
+            page_count += 1
+            
+            # Check for next page
+            next_page_token = data.get('next_page_token')
+            if not next_page_token:
+                break
+            
+            # Google requires a short delay before using next_page_token
+            time.sleep(2)
+            params = {
+                "pagetoken": next_page_token,
+                "key": GOOGLE_PLACES_API_KEY
+            }
         
-        if data.get('status') != 'OK' and data.get('status') != 'ZERO_RESULTS':
-            print(f"Google API error: {data.get('error_message', 'Unknown error')}")
-            return []
+        print(f"Total places fetched: {len(all_results)}")
         
         results = []
-        for place in data.get('results', [])[:50]:  # Get up to 50 results
+        for place in all_results:
             # Calculate distance using Haversine formula
             place_lat = place['geometry']['location']['lat']
             place_lng = place['geometry']['location']['lng']
@@ -814,11 +904,13 @@ async def get_demographics_charts(pincode: str):
 # Replace the @app.post("/api/leadership") function
 @app.post("/api/leadership")
 async def search_leadership(request: dict):
-    company_name = request.get('company_name', '').strip()
-    if not company_name:
+    raw_company_name = request.get('company_name', '').strip()
+    if not raw_company_name:
         return []
 
-    print(f"--- Searching Leadership for: {company_name} ---")
+    # Clean name to get parent company
+    company_name = clean_company_name_for_search(raw_company_name)
+    print(f"--- Searching Leadership for: {company_name} (raw: {raw_company_name}) ---")
     leadership_profiles = []
 
     # ============================================================
@@ -838,32 +930,45 @@ async def search_leadership(request: dict):
                 azure_endpoint=AZURE_OPENAI_ENDPOINT
             )
             
-            system_prompt = "You are an expert business intelligence assistant. Extract leadership details from provided text or internal knowledge."
+            system_prompt = """You are an expert business intelligence assistant with knowledge of corporate leadership.
+You have accurate information about executives at major companies from your training data.
+You also know LinkedIn URLs for many well-known executives - include them when you're confident they are correct."""
             
-            user_prompt = f"Find the leadership team for '{company_name}'."
+            user_prompt = f"""Find the current leadership team for '{company_name}'.
+
+I need:
+1. Names of key executives (CEO, MD, CFO, Managing Directors, etc.)
+2. Their exact current titles
+3. Their LinkedIn URLs if you know them
+"""
             
             if web_context:
                 user_prompt += f"""
-                I have gathered the following text from the web about this company.
-                Use THIS TEXT to find names, titles, and LinkedIn URLs.
-                
-                WEB CONTEXT:
-                {web_context}
-                
-                Based on the context above, extract the leadership.
-                """
-            else:
-                user_prompt += " (No web context found. Please use your internal knowledge base.)"
+
+WEB CONTEXT:
+{web_context}
+"""
 
             user_prompt += """
-            
-            Return a JSON array of objects. Example:
-            [
-              {"name": "Name", "title": "Title", "linkedin": "URL or null"}
-            ]
-            
-            If you find names in the text, YOU MUST return them. Do not return an empty array if names are present in the context.
-            """
+
+Return a JSON array. For each person:
+- "name": Full name (MUST be accurate)
+- "title": Current title at this company
+- "linkedin": The LinkedIn URL if you know it, otherwise null
+
+Example:
+[
+  {"name": "Satya Nadella", "title": "CEO", "linkedin": "https://www.linkedin.com/in/satyanadella"},
+  {"name": "Amy Hood", "title": "CFO", "linkedin": null}
+]
+
+RULES:
+1. Return 3-5 key executives for well-known companies
+2. Names and titles must be accurate
+3. Only include LinkedIn URLs you are confident are correct
+4. LinkedIn URLs should be in format: https://www.linkedin.com/in/username
+5. If unsure about a LinkedIn URL, set to null
+"""
 
             response = client.chat.completions.create(
                 model=AZURE_OPENAI_DEPLOYMENT_NAME,
@@ -894,6 +999,30 @@ async def search_leadership(request: dict):
                 
                 if leadership_profiles:
                     print(f"Step 2 (AI) found {len(leadership_profiles)} profiles.")
+                    
+                    # STEP 2.5: Validate AI LinkedIn URLs and search for missing ones
+                    print("Step 2.5: Validating/searching LinkedIn URLs...")
+                    for profile in leadership_profiles:
+                        name = profile.get('name', '')
+                        ai_linkedin = profile.get('linkedin')
+                        
+                        # Validate AI-provided URL
+                        if ai_linkedin and ai_linkedin != 'null' and isinstance(ai_linkedin, str):
+                            # Check if it's a valid LinkedIn format
+                            if 'linkedin.com/in/' in ai_linkedin and len(ai_linkedin) < 100:
+                                # Looks valid, keep it
+                                print(f"  {name} -> AI provided: {ai_linkedin}")
+                                continue
+                            else:
+                                # Invalid format, clear it
+                                profile['linkedin'] = None
+                        
+                        # Need to search for this person's LinkedIn
+                        if name:
+                            linkedin_url = search_linkedin_url(name, company_name)
+                            profile['linkedin'] = linkedin_url if linkedin_url else None
+                            print(f"  {name} -> searched: {linkedin_url or 'not found'}")
+                    
             except json.JSONDecodeError:
                 print("AI returned invalid JSON.")
                 leadership_profiles = []
@@ -963,6 +1092,55 @@ async def search_contactout_company(company_name: str):
     except Exception as e:
         print(f"ContactOut Error: {e}")
         return []
+
+
+def search_contactout_person(name: str = '', title: str = '', company: str = ''):
+    """Search ContactOut for a person matching name/title/company and return linkedin_url (or '')"""
+    if not CONTACTOUT_API_KEY:
+        print("ContactOut API key not configured")
+        return ''
+
+    try:
+        url = "https://api.contactout.com/v2/search"
+        headers = {
+            "Authorization": f"Bearer {CONTACTOUT_API_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        query = {}
+        if name:
+            query["name"] = name
+        if company:
+            query["company"] = company
+        if title:
+            query["title"] = title
+
+        print(f"ContactOut person search query: {query}")
+
+        # Set a small limit and try to find best match
+        response = requests.post(url, json={**query, "limit": 5}, headers=headers, timeout=10)
+        print(f"ContactOut search response status: {response.status_code}")
+        
+        if response.status_code == 200:
+            results = response.json().get('results', [])
+            print(f"ContactOut search found {len(results)} results")
+            
+            for r in results:
+                print(f"  - {r.get('name')} | {r.get('title')} | {r.get('linkedin_url', 'NO URL')}")
+                # prefer exact name match if possible
+                if r.get('name') and name and r.get('name').lower().strip() == name.lower().strip():
+                    return r.get('linkedin_url', '')
+            # fallback: return first linkedin if any
+            for r in results:
+                if r.get('linkedin_url'):
+                    return r.get('linkedin_url')
+        else:
+            print(f"ContactOut search error: {response.status_code} - {response.text[:200]}")
+
+        return ''
+    except Exception as e:
+        print(f"Error in search_contactout_person: {e}")
+        return ''
 # Add new model for credit tracking
 class CreditUsage(BaseModel):
     email_credits: int = 10
@@ -986,11 +1164,31 @@ async def get_credits():
 async def get_contact_details(request: dict):
     """Get contact details using ContactOut API (consumes credits)"""
     linkedin_url = request.get('linkedin_url', '')
+    name = request.get('name', '')
+    title = request.get('title', '')
+    company = request.get('company', '')
     fetch_email = request.get('fetch_email', True)
     fetch_phone = request.get('fetch_phone', True)
-    
+
+    print(f"\n=== ContactOut Request ===")
+    print(f"  linkedin_url: {linkedin_url}")
+    print(f"  name: {name}")
+    print(f"  title: {title}")
+    print(f"  company: {company}")
+
+    # If no linkedin_url provided, try to search ContactOut for the profile using name/title/company
     if not linkedin_url:
-        raise HTTPException(status_code=400, detail="LinkedIn URL required")
+        print("No LinkedIn URL provided, searching ContactOut...")
+        if CONTACTOUT_API_KEY:
+            try:
+                linkedin_url = search_contactout_person(name=name, title=title, company=company)
+                print(f"Resolved linkedin_url from ContactOut search: {linkedin_url}")
+            except Exception as e:
+                print(f"ContactOut person search error: {e}")
+
+    if not linkedin_url:
+        print("ERROR: No LinkedIn URL found/resolved")
+        raise HTTPException(status_code=400, detail="LinkedIn URL or person details required")
     
     # Check credits
     credits_needed = {
@@ -1067,6 +1265,93 @@ async def get_contact_details(request: dict):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/resolve_linkedin")
+async def resolve_linkedin(request: dict):
+    """Resolve a person's LinkedIn URL using AI or web search; fallback to ContactOut search as last resort."""
+    name = request.get('name', '').strip()
+    title = request.get('title', '').strip()
+    company = request.get('company', '').strip()
+
+    if not (name or company):
+        return {"linkedin": ""}
+
+    # Try OpenAI first (if configured)
+    if AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT:
+        try:
+            client = AzureOpenAI(
+                api_key=AZURE_OPENAI_API_KEY,
+                api_version=AZURE_OPENAI_API_VERSION,
+                azure_endpoint=AZURE_OPENAI_ENDPOINT
+            )
+
+            system_prompt = "You are a helpful assistant that returns a single LinkedIn profile URL for a named person if it exists, otherwise return 'null'."
+            user_prompt = f"Find the public LinkedIn URL (profile) for the person with name: '{name}'"
+            if title:
+                user_prompt += f", title: '{title}'"
+            if company:
+                user_prompt += f", company: '{company}'"
+            user_prompt += ".\nReturn ONLY the URL (e.g. https://www.linkedin.com/in/...) or the word null if not found."
+
+            response = client.chat.completions.create(
+                model=AZURE_OPENAI_DEPLOYMENT_NAME,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.0,
+                max_tokens=200
+            )
+
+            content = response.choices[0].message.content.strip()
+            # Extract URL or null
+            if content.lower() == 'null' or content == 'None' or not content:
+                linkedin_url = ''
+            else:
+                linkedin_url = content.split('\n')[0].strip()
+                # sanitize
+                if linkedin_url.endswith('.'):
+                    linkedin_url = linkedin_url[:-1]
+
+            if linkedin_url:
+                return {"linkedin": linkedin_url}
+        except Exception as e:
+            print(f"AI resolve_linkedin error: {e}")
+
+    # Next, try web search via DDGS
+    try:
+        queries = []
+        if name and company:
+            queries.append(f"{name} {company} linkedin")
+        if name and title:
+            queries.append(f"{name} {title} linkedin")
+        if name:
+            queries.append(f"{name} linkedin")
+
+        with DDGS() as ddgs:
+            for q in queries:
+                try:
+                    results = list(ddgs.text(q, max_results=8))
+                    for r in results:
+                        href = r.get('href','')
+                        if href and 'linkedin.com/in/' in href:
+                            # prefer cleaned linkedin url
+                            return {"linkedin": href}
+                except Exception:
+                    continue
+    except Exception as e:
+        print(f"DDGS resolve error: {e}")
+
+    # Last resort: try ContactOut person search to get linkedin URL
+    try:
+        linkedin_from_contactout = search_contactout_person(name=name, title=title, company=company)
+        if linkedin_from_contactout:
+            return {"linkedin": linkedin_from_contactout}
+    except Exception as e:
+        print(f"ContactOut resolve fallback error: {e}")
+
+    return {"linkedin": ""}
 if __name__ == "__main__":
     print("Starting Server at http://127.0.0.1:8000")
     uvicorn.run(app, host="127.0.0.1", port=8000)
