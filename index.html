@@ -236,6 +236,74 @@
         body.light-mode #kpi-work {
             color: #0f172a !important;
         }
+
+        /* Light mode - Leads expanded sections */
+        body.light-mode .bg-slate-800\/30 {
+            background: rgba(248, 250, 252, 0.8) !important;
+        }
+
+        body.light-mode .bg-slate-900\/50 {
+            background: rgba(241, 245, 249, 0.9) !important;
+        }
+
+        body.light-mode .bg-purple-900\/30 {
+            background: rgba(196, 181, 253, 0.2) !important;
+        }
+
+        /* Light mode - Agent names in purple boxes */
+        body.light-mode .bg-purple-900\/30 .text-white {
+            color: #603e9a !important;
+        }
+
+        /* Light mode - Company names */
+        body.light-mode .company-name-text {
+            color: #393939 !important;
+        }
+
+        /* Light mode - Addresses in expanded sections */
+        body.light-mode .bg-slate-800\/30 .text-slate-300 {
+            color: #94a3b8 !important;
+        }
+
+        /* Light mode - Global loader */
+        body.light-mode #global-loader {
+            background: rgba(255, 255, 255, 0.95) !important;
+        }
+
+        body.light-mode #global-loader h2 {
+            color: #005eac !important;
+        }
+
+        body.light-mode #global-loader .spinner {
+            border-color: rgba(0, 94, 172, 0.2) !important;
+            border-left-color: #005eac !important;
+        }
+
+        /* Light mode - Modal step 3 (Prospecting) */
+        body.light-mode #modal-step-3 .bg-slate-800 {
+            background: #002f55 !important;
+            border-color: #94a3b8 !important;
+        }
+
+        body.light-mode #modal-step-3 .text-gray-400 {
+            color: #cbd5e1 !important;
+        }
+
+        body.light-mode #res-name {
+            color: #ffffff !important;
+        }
+
+        body.light-mode #res-role {
+            color: #93c5fd !important;
+        }
+
+        body.light-mode #credit-warning-section .text-gray-300 {
+            color: #4b5563 !important;
+        }
+
+        body.light-mode #credit-warning-section .text-xs {
+            color: #6b7280 !important;
+        }
     </style>
 </head>
 <body class="min-h-screen flex relative selection:bg-blue-500 selection:text-white transition-colors duration-300" id="app-body">
@@ -262,10 +330,15 @@
     <aside class="w-80 h-screen glass-panel z-30 flex flex-col border-r border-white/5 fixed md:relative -translate-x-full md:translate-x-0 transition-transform duration-300" id="sidebar">
         <div class="p-8 border-b border-white/5">
             <h1 class="text-2xl font-bold tracking-tight flex items-center gap-3" id="sidebar-title">
-                <div class="w-8 h-8 rounded-lg bg-gradient-to-tr from-blue-500 to-purple-500 flex items-center justify-center shadow-lg shadow-blue-500/20">
-                    <i class="fas fa-bolt text-white text-sm"></i>
+                <div class="w-8 h-8 rounded-lg
+                            bg-gradient-to-tr from-[#005eac] to-[#0a6fc4]
+                            flex items-center justify-center
+                            shadow-lg shadow-[#005eac]/30">
+                    <i class="fas fa-map-marker-alt text-white text-sm"></i>
                 </div>
-                LeadGen
+
+
+                PinBook
             </h1>
         </div>
 
@@ -278,7 +351,14 @@
                     <i class="fas fa-map-marker-alt absolute left-4 top-3.5 text-slate-500 group-focus-within:text-blue-400 transition-colors"></i>
                     <input type="text" id="pincode-input" class="w-full pl-10 pr-4 py-3 rounded-xl text-sm font-medium" placeholder="Enter 6-digit Pincode">
                 </div>
-                <button onclick="executeSearch()" class="w-full mt-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold py-3 rounded-xl shadow-lg shadow-blue-900/40 transition-all transform active:scale-95 flex justify-center items-center gap-2">
+                <button onclick="executeSearch()"
+                    class="w-full mt-4 bg-gradient-to-r from-[#005eac] to-[#004b8a]
+                            hover:from-[#0a6fc4] hover:to-[#005eac]
+                            text-white font-bold py-3 rounded-xl
+                            shadow-lg shadow-blue-900/40
+                            transition-all transform active:scale-95
+                            flex justify-center items-center gap-2">
+
                     <i class="fas fa-search"></i> Initiate Search
                 </button>
             </div>
@@ -323,8 +403,8 @@
                     <i class="fas fa-globe-americas text-4xl text-slate-600 group-hover:text-blue-500 transition-colors duration-500"></i>
                     <div class="absolute inset-0 rounded-full border border-slate-700 scale-125 animate-ping opacity-20"></div>
                 </div>
-                <h2 class="text-3xl font-bold mb-2" id="empty-title">System Online</h2>
-                <p class="text-sm">Enter a pincode to begin the intelligence sequence.</p>
+                <h2 class="text-3xl font-bold mb-2" id="empty-title">Location-Based Lead Intelligence</h2>
+                <p class="text-sm">Enter a pincode to view area demographics, local events, and businesses, along with relevant contact information.</p>
             </div>
 
             <!-- 2. Location Result Section -->
@@ -747,7 +827,7 @@
 
         // --- State ---
         const state = {
-            apiUrl: localStorage.getItem('apiUrl') || 'http://127.0.0.1:8000',
+            apiUrl: localStorage.getItem('apiUrl') || (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' ? 'http://127.0.0.1:8000' : window.location.origin),
             currentState: null,
             currentLead: null,
             currentPincode: null,
@@ -1642,8 +1722,10 @@
                 row.innerHTML = `
                     <td class="p-4">
                         <div class="flex items-center gap-2">
-                            ${isExpandable ? `<i class="fas fa-chevron-right text-slate-500 transition-transform duration-200" id="chevron-${uniqueId}"></i>` : '<span class="w-4"></span>'}
-                            <span class="font-semibold text-white">${company.name}</span>
+                            <div class="w-4 flex items-center justify-center flex-shrink-0">
+                                ${isExpandable ? `<i class="fas fa-chevron-right text-slate-500 transition-transform duration-200" id="chevron-${uniqueId}"></i>` : ''}
+                            </div>
+                            <span class="font-semibold text-slate-300 company-name-text">${company.name}</span>
                             ${infoBadges}
                         </div>
                     </td>
@@ -1836,18 +1918,32 @@
             btn.disabled = true;
 
             try {
-                const res = await fetch(`${state.apiUrl}/api/leadership`, {
-                    method: "POST",
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ company_name: state.currentLead.name })
-                });
+                // Check cache first
+                const cacheKey = `leadership_${state.currentLead.name.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
+                const cached = getCached(cacheKey);
                 
-                console.log('Leadership API response status:', res.status, res.ok);
-                
-                if (!res.ok) throw new Error(`Failed to fetch leadership: ${res.status} ${res.statusText}`);
-                
-                const leaders = await res.json();
-                console.log('Leadership profiles received:', leaders);
+                let leaders;
+                if (cached) {
+                    console.log('Using cached leadership data');
+                    leaders = cached;
+                } else {
+                    // Fetch from API
+                    const res = await fetch(`${state.apiUrl}/api/leadership`, {
+                        method: "POST",
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ company_name: state.currentLead.name })
+                    });
+                    
+                    console.log('Leadership API response status:', res.status, res.ok);
+                    
+                    if (!res.ok) throw new Error(`Failed to fetch leadership: ${res.status} ${res.statusText}`);
+                    
+                    leaders = await res.json();
+                    console.log('Leadership profiles received:', leaders);
+                    
+                    // Cache the results
+                    setCache(cacheKey, leaders);
+                }
 
                 if (!leaders || leaders.length === 0) {
                     console.log('No leaders found');

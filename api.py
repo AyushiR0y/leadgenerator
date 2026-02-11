@@ -7,13 +7,14 @@ import pandas as pd
 import uvicorn
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pydantic import BaseModel
 import json
 from openai import AzureOpenAI
 from bs4 import BeautifulSoup
-from ddgs import DDGS 
+
 # Load Environment Variables
 load_dotenv()
 
@@ -28,6 +29,7 @@ AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-pre
 AZURE_OPENAI_DEPLOYMENT_NAME = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
 
 GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY") 
+GOOGLE_SEARCH_ENGINE_ID = os.getenv("GOOGLE_SEARCH_ENGINE_ID")
 CONTACTOUT_API_KEY = os.getenv("CONTACTOUT_API_KEY")
 
 # --- Data Loading (Global State) ---
@@ -83,6 +85,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ==========================================
+# SERVE FRONTEND
+# ==========================================
+@app.get("/")
+async def serve_frontend():
+    """Serve the index.html frontend"""
+    return FileResponse("index.html")
 
 # ==========================================
 # HELPER FUNCTIONS (From your request)
@@ -330,7 +340,6 @@ def create_occupation_visualization(filtered_data, gender, worker_type):
 import requests
 import re
 from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS
 
 def clean_company_name_for_search(company_name: str) -> str:
     """
@@ -360,106 +369,89 @@ def clean_company_name_for_search(company_name: str) -> str:
 
 def search_linkedin_url(person_name: str, company_name: str = '') -> str:
     """
-    Search for a person's LinkedIn URL.
-    Try ContactOut first (reliable), then DDGS as backup.
+    Search for a person's LinkedIn URL using web search engines.
+    Uses Bing and DuckDuckGo HTML (no API timeouts).
     """
     if not person_name:
         return ''
     
-    # Method 1: Try ContactOut search (most reliable)
-    if CONTACTOUT_API_KEY:
-        try:
-            linkedin_url = search_contactout_person(name=person_name, company=company_name)
-            if linkedin_url:
-                print(f"  Found via ContactOut: {linkedin_url}")
-                return linkedin_url
-        except Exception as e:
-            print(f"ContactOut search error for {person_name}: {e}")
-    
-    # Method 2: Try DDGS (may timeout)
-    try:
-        query = f'"{person_name}" site:linkedin.com/in'
-        if company_name:
-            query = f'"{person_name}" "{company_name}" site:linkedin.com/in'
-        
-        with DDGS() as ddgs:
-            try:
-                results = list(ddgs.text(query, max_results=3))
-                for r in results:
-                    url = r.get('href', '')
-                    if url and 'linkedin.com/in/' in url:
-                        if '?' in url:
-                            url = url.split('?')[0]
-                        return url
-            except Exception as e:
-                print(f"DDGS timeout for {person_name}")
-                    
-    except Exception as e:
-        print(f"LinkedIn search error: {e}")
-    
-    return ''
+    # Use multi-engine search (Bing + DuckDuckGo HTML)
+    linkedin_url = search_linkedin_via_web(person_name, company_name)
+    return linkedin_url
 
 def get_web_context(company_name: str):
     """
-    Gathers context from the web. Prioritizes search snippets (reliable)
-    over full page scraping (often blocked).
+    Gathers context from the web using Google Custom Search API.
+    Falls back to Bing if Google not configured.
     """
     context_text = ""
+    collected_snippets = []
+    
     try:
-        # 1. Perform Search
+        # Search queries for leadership info
         search_queries = [
-            f"{company_name} leadership team CEO India",
-            f"{company_name} managing director",
-            f"site:linkedin.com {company_name} CEO" # Try to find LinkedIn directly
+            f"{company_name} leadership team CEO",
+            f"{company_name} managing director executives",
         ]
         
-        collected_snippets = []
-
-        try:
-            with DDGS() as ddgs:
-                for query in search_queries:
-                    try:
-                        # Get raw results
-                        results = list(ddgs.text(query, max_results=5))
-                        for result in results:
-                            title = result.get('title', '')
-                            body = result.get('body', '')
-                            url = result.get('href', '')
-                            
-                            # Add snippet to context
-                            snippet = f"Source: {title}\nInfo: {body}\n"
-                            collected_snippets.append(snippet)
-                            
-                            # 2. Attempt Scrape ONLY if it looks like a direct company page (not LinkedIn/PDF)
-                            if url and "linkedin.com" not in url and ".pdf" not in url:
-                                try:
-                                    headers = {
-                                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-                                    }
-                                    resp = requests.get(url, headers=headers, timeout=5)
-                                    if resp.status_code == 200:
-                                        soup = BeautifulSoup(resp.content, 'html.parser')
-                                        # Remove scripts
-                                        for s in soup(["script", "style", "nav", "footer"]):
-                                            s.decompose()
-                                        page_text = soup.get_text(separator=' ', strip=True)
-                                        # Add first 1000 chars of page text
-                                        context_text += f"\n--- Page Content from {url} ---\n{page_text[:1500]}\n"
-                                except Exception:
-                                    continue # Skip if scrape fails
-                    except Exception as e:
-                        print(f"Error searching query '{query}': {str(e)}")
-                        continue  # Continue with next query if this one times out
-        except Exception as e:
-            print(f"Web search failed: {str(e)}. Continuing with AI-only processing...")
-            # Continue without web results - AI can still generate profiles
-
-        # Combine snippets (These are high value data for AI)
-        if collected_snippets:
-            context_text += "\n--- Search Results Snippets ---\n" + "\n".join(collected_snippets)
+        # Method 1: Google Custom Search API
+        if GOOGLE_PLACES_API_KEY and GOOGLE_SEARCH_ENGINE_ID:
+            for query in search_queries:
+                try:
+                    params = {
+                        'key': GOOGLE_PLACES_API_KEY,
+                        'cx': GOOGLE_SEARCH_ENGINE_ID,
+                        'q': query,
+                        'num': 5
+                    }
+                    response = requests.get(
+                        'https://www.googleapis.com/customsearch/v1',
+                        params=params,
+                        timeout=10
+                    )
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        for item in data.get('items', []):
+                            title = item.get('title', '')
+                            snippet = item.get('snippet', '')
+                            if title and snippet:
+                                collected_snippets.append(f"Source: {title}\nInfo: {snippet}\n")
+                except Exception as e:
+                    print(f"Google search error for '{query}': {e}")
+                    continue
+        
+        # Method 2: Fallback to Bing HTML
+        if not collected_snippets:
+            import urllib.parse
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            }
             
-        print(f"Web Search gathered {len(collected_snippets)} snippets and page content.")
-        return context_text[:4000] # Limit tokens
+            for query in search_queries:
+                try:
+                    encoded_query = urllib.parse.quote(query)
+                    url = f"https://www.bing.com/search?q={encoded_query}"
+                    response = requests.get(url, headers=headers, timeout=6)
+                    
+                    if response.status_code == 200:
+                        soup = BeautifulSoup(response.text, 'html.parser')
+                        for result in soup.select('.b_algo')[:5]:
+                            title_elem = result.select_one('h2')
+                            snippet_elem = result.select_one('.b_caption p')
+                            if title_elem and snippet_elem:
+                                title = title_elem.get_text(strip=True)
+                                snippet = snippet_elem.get_text(strip=True)
+                                collected_snippets.append(f"Source: {title}\nInfo: {snippet}\n")
+                except Exception as e:
+                    print(f"Bing search error for '{query}': {e}")
+                    continue
+        
+        if collected_snippets:
+            context_text = "\n--- Search Results ---\n" + "\n".join(collected_snippets[:8])
+            
+        print(f"Web Search gathered {len(collected_snippets)} snippets.")
+        return context_text[:3000]  # Limit tokens
 
     except Exception as e:
         print(f"Error getting web context: {e}")
@@ -932,14 +924,13 @@ async def search_leadership(request: dict):
             
             system_prompt = """You are an expert business intelligence assistant with knowledge of corporate leadership.
 You have accurate information about executives at major companies from your training data.
-You also know LinkedIn URLs for many well-known executives - include them when you're confident they are correct."""
+DO NOT provide LinkedIn URLs - they will be looked up separately."""
             
             user_prompt = f"""Find the current leadership team for '{company_name}'.
 
 I need:
 1. Names of key executives (CEO, MD, CFO, Managing Directors, etc.)
 2. Their exact current titles
-3. Their LinkedIn URLs if you know them
 """
             
             if web_context:
@@ -954,20 +945,18 @@ WEB CONTEXT:
 Return a JSON array. For each person:
 - "name": Full name (MUST be accurate)
 - "title": Current title at this company
-- "linkedin": The LinkedIn URL if you know it, otherwise null
+- "linkedin": Always set to null (will be searched separately)
 
 Example:
 [
-  {"name": "Satya Nadella", "title": "CEO", "linkedin": "https://www.linkedin.com/in/satyanadella"},
+  {"name": "Satya Nadella", "title": "CEO", "linkedin": null},
   {"name": "Amy Hood", "title": "CFO", "linkedin": null}
 ]
 
 RULES:
 1. Return 3-5 key executives for well-known companies
-2. Names and titles must be accurate
-3. Only include LinkedIn URLs you are confident are correct
-4. LinkedIn URLs should be in format: https://www.linkedin.com/in/username
-5. If unsure about a LinkedIn URL, set to null
+2. Names and titles must be accurate from your knowledge
+3. Always set linkedin to null - DO NOT generate LinkedIn URLs
 """
 
             response = client.chat.completions.create(
@@ -1000,28 +989,16 @@ RULES:
                 if leadership_profiles:
                     print(f"Step 2 (AI) found {len(leadership_profiles)} profiles.")
                     
-                    # STEP 2.5: Validate AI LinkedIn URLs and search for missing ones
-                    print("Step 2.5: Validating/searching LinkedIn URLs...")
+                    # STEP 2.5: Search for LinkedIn URLs for each person
+                    print("Step 2.5: Searching LinkedIn URLs...")
                     for profile in leadership_profiles:
                         name = profile.get('name', '')
-                        ai_linkedin = profile.get('linkedin')
-                        
-                        # Validate AI-provided URL
-                        if ai_linkedin and ai_linkedin != 'null' and isinstance(ai_linkedin, str):
-                            # Check if it's a valid LinkedIn format
-                            if 'linkedin.com/in/' in ai_linkedin and len(ai_linkedin) < 100:
-                                # Looks valid, keep it
-                                print(f"  {name} -> AI provided: {ai_linkedin}")
-                                continue
-                            else:
-                                # Invalid format, clear it
-                                profile['linkedin'] = None
-                        
-                        # Need to search for this person's LinkedIn
                         if name:
                             linkedin_url = search_linkedin_url(name, company_name)
                             profile['linkedin'] = linkedin_url if linkedin_url else None
-                            print(f"  {name} -> searched: {linkedin_url or 'not found'}")
+                            print(f"  {name} -> {linkedin_url or 'not found'}")
+                        else:
+                            profile['linkedin'] = None
                     
             except json.JSONDecodeError:
                 print("AI returned invalid JSON.")
@@ -1094,53 +1071,85 @@ async def search_contactout_company(company_name: str):
         return []
 
 
-def search_contactout_person(name: str = '', title: str = '', company: str = ''):
-    """Search ContactOut for a person matching name/title/company and return linkedin_url (or '')"""
-    if not CONTACTOUT_API_KEY:
-        print("ContactOut API key not configured")
+def search_linkedin_via_web(name: str, company: str = '') -> str:
+    """Search for LinkedIn profile URL using Google Custom Search API"""
+    import re
+    
+    if not name:
         return ''
-
+    
+    def extract_linkedin_url(url_or_text):
+        """Extract and clean LinkedIn profile URL"""
+        pattern = r'https?://(?:www\.)?linkedin\.com/in/[a-zA-Z0-9\-_%]+'
+        if 'linkedin.com/in/' in url_or_text:
+            matches = re.findall(pattern, url_or_text)
+            for url in matches:
+                url = url.split('?')[0].split('&')[0]
+                if len(url) < 100:
+                    return url
+        return None
+    
+    # Build search query
+    query_parts = [name]
+    if company:
+        query_parts.append(company)
+    query_parts.append("LinkedIn")
+    query = " ".join(query_parts)
+    
+    # Method 1: Google Custom Search API (most reliable)
+    if GOOGLE_PLACES_API_KEY and GOOGLE_SEARCH_ENGINE_ID:
+        try:
+            params = {
+                'key': GOOGLE_PLACES_API_KEY,
+                'cx': GOOGLE_SEARCH_ENGINE_ID,
+                'q': f'site:linkedin.com/in {query}',
+                'num': 5
+            }
+            response = requests.get(
+                'https://www.googleapis.com/customsearch/v1',
+                params=params,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                items = data.get('items', [])
+                for item in items:
+                    link = item.get('link', '')
+                    linkedin_url = extract_linkedin_url(link)
+                    if linkedin_url:
+                        print(f"  Google found: {linkedin_url}")
+                        return linkedin_url
+            else:
+                print(f"  Google Custom Search error: {response.status_code} - {response.text[:200]}")
+        except Exception as e:
+            print(f"  Google Custom Search failed: {e}")
+    
+    # Method 2: Fallback to Bing HTML (if Google not configured)
     try:
-        url = "https://api.contactout.com/v2/search"
+        import urllib.parse
         headers = {
-            "Authorization": f"Bearer {CONTACTOUT_API_KEY}",
-            "Content-Type": "application/json"
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         }
-
-        query = {}
-        if name:
-            query["name"] = name
-        if company:
-            query["company"] = company
-        if title:
-            query["title"] = title
-
-        print(f"ContactOut person search query: {query}")
-
-        # Set a small limit and try to find best match
-        response = requests.post(url, json={**query, "limit": 5}, headers=headers, timeout=10)
-        print(f"ContactOut search response status: {response.status_code}")
+        bing_query = urllib.parse.quote(f'site:linkedin.com/in {query}')
+        bing_url = f"https://www.bing.com/search?q={bing_query}"
+        response = requests.get(bing_url, headers=headers, timeout=8)
         
         if response.status_code == 200:
-            results = response.json().get('results', [])
-            print(f"ContactOut search found {len(results)} results")
-            
-            for r in results:
-                print(f"  - {r.get('name')} | {r.get('title')} | {r.get('linkedin_url', 'NO URL')}")
-                # prefer exact name match if possible
-                if r.get('name') and name and r.get('name').lower().strip() == name.lower().strip():
-                    return r.get('linkedin_url', '')
-            # fallback: return first linkedin if any
-            for r in results:
-                if r.get('linkedin_url'):
-                    return r.get('linkedin_url')
-        else:
-            print(f"ContactOut search error: {response.status_code} - {response.text[:200]}")
-
-        return ''
+            linkedin_url = extract_linkedin_url(response.text)
+            if linkedin_url:
+                print(f"  Bing found: {linkedin_url}")
+                return linkedin_url
     except Exception as e:
-        print(f"Error in search_contactout_person: {e}")
-        return ''
+        print(f"  Bing search failed: {e}")
+    
+    return ''
+
+
+def search_linkedin_via_google(name: str, company: str = '') -> str:
+    """Wrapper that calls the Google search"""
+    return search_linkedin_via_web(name, company)
+
 # Add new model for credit tracking
 class CreditUsage(BaseModel):
     email_credits: int = 10
@@ -1176,15 +1185,14 @@ async def get_contact_details(request: dict):
     print(f"  title: {title}")
     print(f"  company: {company}")
 
-    # If no linkedin_url provided, try to search ContactOut for the profile using name/title/company
+    # If no linkedin_url provided, try to search Google for the profile using name/company
     if not linkedin_url:
-        print("No LinkedIn URL provided, searching ContactOut...")
-        if CONTACTOUT_API_KEY:
-            try:
-                linkedin_url = search_contactout_person(name=name, title=title, company=company)
-                print(f"Resolved linkedin_url from ContactOut search: {linkedin_url}")
-            except Exception as e:
-                print(f"ContactOut person search error: {e}")
+        print("No LinkedIn URL provided, searching Google...")
+        try:
+            linkedin_url = search_linkedin_via_google(name, company)
+            print(f"Resolved linkedin_url from Google search: {linkedin_url}")
+        except Exception as e:
+            print(f"Google search error: {e}")
 
     if not linkedin_url:
         print("ERROR: No LinkedIn URL found/resolved")
@@ -1269,7 +1277,7 @@ async def get_contact_details(request: dict):
 
 @app.post("/api/resolve_linkedin")
 async def resolve_linkedin(request: dict):
-    """Resolve a person's LinkedIn URL using AI or web search; fallback to ContactOut search as last resort."""
+    """Resolve a person's LinkedIn URL using web search engines."""
     name = request.get('name', '').strip()
     title = request.get('title', '').strip()
     company = request.get('company', '').strip()
@@ -1277,81 +1285,15 @@ async def resolve_linkedin(request: dict):
     if not (name or company):
         return {"linkedin": ""}
 
-    # Try OpenAI first (if configured)
-    if AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT:
-        try:
-            client = AzureOpenAI(
-                api_key=AZURE_OPENAI_API_KEY,
-                api_version=AZURE_OPENAI_API_VERSION,
-                azure_endpoint=AZURE_OPENAI_ENDPOINT
-            )
+    # Use multi-engine search (Bing + DuckDuckGo HTML)
+    linkedin_url = search_linkedin_via_web(name, company)
+    
+    # If not found, try with title
+    if not linkedin_url and title:
+        linkedin_url = search_linkedin_via_web(f"{name} {title}", company)
+    
+    return {"linkedin": linkedin_url or ""}
 
-            system_prompt = "You are a helpful assistant that returns a single LinkedIn profile URL for a named person if it exists, otherwise return 'null'."
-            user_prompt = f"Find the public LinkedIn URL (profile) for the person with name: '{name}'"
-            if title:
-                user_prompt += f", title: '{title}'"
-            if company:
-                user_prompt += f", company: '{company}'"
-            user_prompt += ".\nReturn ONLY the URL (e.g. https://www.linkedin.com/in/...) or the word null if not found."
-
-            response = client.chat.completions.create(
-                model=AZURE_OPENAI_DEPLOYMENT_NAME,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.0,
-                max_tokens=200
-            )
-
-            content = response.choices[0].message.content.strip()
-            # Extract URL or null
-            if content.lower() == 'null' or content == 'None' or not content:
-                linkedin_url = ''
-            else:
-                linkedin_url = content.split('\n')[0].strip()
-                # sanitize
-                if linkedin_url.endswith('.'):
-                    linkedin_url = linkedin_url[:-1]
-
-            if linkedin_url:
-                return {"linkedin": linkedin_url}
-        except Exception as e:
-            print(f"AI resolve_linkedin error: {e}")
-
-    # Next, try web search via DDGS
-    try:
-        queries = []
-        if name and company:
-            queries.append(f"{name} {company} linkedin")
-        if name and title:
-            queries.append(f"{name} {title} linkedin")
-        if name:
-            queries.append(f"{name} linkedin")
-
-        with DDGS() as ddgs:
-            for q in queries:
-                try:
-                    results = list(ddgs.text(q, max_results=8))
-                    for r in results:
-                        href = r.get('href','')
-                        if href and 'linkedin.com/in/' in href:
-                            # prefer cleaned linkedin url
-                            return {"linkedin": href}
-                except Exception:
-                    continue
-    except Exception as e:
-        print(f"DDGS resolve error: {e}")
-
-    # Last resort: try ContactOut person search to get linkedin URL
-    try:
-        linkedin_from_contactout = search_contactout_person(name=name, title=title, company=company)
-        if linkedin_from_contactout:
-            return {"linkedin": linkedin_from_contactout}
-    except Exception as e:
-        print(f"ContactOut resolve fallback error: {e}")
-
-    return {"linkedin": ""}
 if __name__ == "__main__":
     print("Starting Server at http://127.0.0.1:8000")
     uvicorn.run(app, host="127.0.0.1", port=8000)
