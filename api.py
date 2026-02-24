@@ -1,5 +1,4 @@
 import os
-import time
 import math
 import asyncio
 import requests
@@ -110,6 +109,147 @@ def safe_float(value):
         return float(value) if pd.notna(value) else 0.0
     except:
         return 0.0
+
+
+def calculate_distance_km(source_lat: float, source_lng: float, target_lat: float, target_lng: float) -> float:
+    """Calculate distance between two coordinates using Haversine formula."""
+    radius = 6371  # Earth radius in km
+    source_lat_rad = math.radians(source_lat)
+    target_lat_rad = math.radians(target_lat)
+    delta_lat = math.radians(target_lat - source_lat)
+    delta_lng = math.radians(target_lng - source_lng)
+
+    a = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(source_lat_rad) * math.cos(target_lat_rad) * math.sin(delta_lng / 2) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return radius * c
+
+
+def get_overpass_filters(keyword: str) -> List[str]:
+    """Map UI lead keywords to Overpass filters for OSM fallback."""
+    normalized = (keyword or "").strip().lower()
+
+    filters_map = {
+        "industry": [
+            '"industrial"',
+            '"man_made"="works"',
+            '"office"="company"',
+            '"shop"="wholesale"',
+            '"craft"',
+        ],
+        "insurance agency": [
+            '"office"="insurance"',
+            '"amenity"="insurance"',
+        ],
+        "bank": [
+            '"amenity"="bank"',
+            '"amenity"="atm"',
+            '"office"="financial"',
+        ],
+        "college": [
+            '"amenity"="college"',
+            '"amenity"="university"',
+            '"amenity"="school"',
+        ],
+        "club gymkhana": [
+            '"leisure"="sports_centre"',
+            '"leisure"="fitness_centre"',
+            '"leisure"="club"',
+            '"amenity"="community_centre"',
+        ],
+    }
+
+    if normalized in filters_map:
+        return filters_map[normalized]
+
+    keyword_safe = normalized.replace('"', '').strip()
+    if keyword_safe:
+        return [f'"name"~"{keyword_safe}",i']
+    return []
+
+
+def get_osm_address(tags: Dict[str, Any]) -> str:
+    """Build a readable address from OSM tags."""
+    if not tags:
+        return "Address not available"
+
+    parts = [
+        tags.get("addr:housenumber", ""),
+        tags.get("addr:street", ""),
+        tags.get("addr:suburb", ""),
+        tags.get("addr:city", ""),
+        tags.get("addr:state", ""),
+    ]
+    address = ", ".join([part for part in parts if part])
+    return address if address else tags.get("name", "Address not available")
+
+
+def search_places_via_osm(lat: float, lng: float, keyword: str, radius_m: int = 10000, limit: int = 60) -> List[Dict[str, Any]]:
+    """Search nearby places using OSM Overpass as fallback when Google Places fails."""
+    filters = get_overpass_filters(keyword)
+    if not filters:
+        return []
+
+    query_blocks = []
+    for filter_expr in filters:
+        query_blocks.append(f"nwr[{filter_expr}](around:{radius_m},{lat},{lng});")
+
+    overpass_query = f"""
+    [out:json][timeout:25];
+    (
+      {''.join(query_blocks)}
+    );
+    out center {limit};
+    """
+
+    try:
+        response = requests.post(
+            "https://overpass-api.de/api/interpreter",
+            data={"data": overpass_query},
+            timeout=20,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except Exception as error:
+        print(f"OSM Overpass fallback failed: {str(error)}")
+        return []
+
+    places = []
+    for element in data.get("elements", []):
+        tags = element.get("tags", {})
+        place_name = str(tags.get("name", "")).strip()
+        if not place_name:
+            continue
+
+        place_lat = element.get("lat")
+        place_lng = element.get("lon")
+
+        if place_lat is None or place_lng is None:
+            center = element.get("center", {})
+            place_lat = center.get("lat")
+            place_lng = center.get("lon")
+
+        if place_lat is None or place_lng is None:
+            continue
+
+        distance = calculate_distance_km(lat, lng, float(place_lat), float(place_lng))
+        places.append(
+            {
+                "name": place_name,
+                "address": get_osm_address(tags),
+                "dist": float(round(distance, 2)),
+                "rating": "N/A",
+                "place_id": f"osm:{element.get('type', 'node')}:{element.get('id', '')}",
+                "types": [value for value in [tags.get("amenity"), tags.get("shop"), tags.get("office"), tags.get("leisure"), tags.get("industrial")] if value],
+                "lat": float(place_lat),
+                "lng": float(place_lng),
+            }
+        )
+
+    places.sort(key=lambda item: item["dist"])
+    return places[:limit]
 def get_demographics_data(district_name, state_name):
     if pca_df is None: return None, "No Data"
     pca_df_copy = pca_df.copy()
@@ -508,112 +648,106 @@ async def search_location(pincode: str):
 async def get_nearby_places(lat: float, lng: float, keyword: str):
     """Get nearby places using Google Places API"""
     print(f"Places search - Lat: {lat}, Lng: {lng}, Keyword: {keyword}")
-    
-    if not GOOGLE_PLACES_API_KEY:
-        print("Google Places API key missing!")
-        raise HTTPException(status_code=500, detail="Google Places API key not configured")
-    
-    try:
-        url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
-        params = {
-            "location": f"{lat},{lng}",
-            "radius": 10000,  # 10km radius
-            "keyword": keyword,
-            "key": GOOGLE_PLACES_API_KEY
-        }
-        
-        print(f"Calling Google Places API with params: {params}")
-        
-        all_results = []
-        page_count = 0
-        max_pages = 3  # Google allows up to 3 pages (60 results)
-        
-        while page_count < max_pages:
-            response = requests.get(url, params=params, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            
-            print(f"Google API response status: {data.get('status')}, page {page_count + 1}")
-            
-            if data.get('status') != 'OK' and data.get('status') != 'ZERO_RESULTS':
-                print(f"Google API error: {data.get('error_message', 'Unknown error')}")
-                break
-            
-            all_results.extend(data.get('results', []))
-            page_count += 1
-            
-            # Check for next page
-            next_page_token = data.get('next_page_token')
-            if not next_page_token:
-                break
-            
-            # Google requires a short delay before using next_page_token
-            time.sleep(2)
+
+    google_error = None
+
+    if GOOGLE_PLACES_API_KEY:
+        try:
+            url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
             params = {
-                "pagetoken": next_page_token,
+                "location": f"{lat},{lng}",
+                "radius": 10000,  # 10km radius
+                "keyword": keyword,
                 "key": GOOGLE_PLACES_API_KEY
             }
-        
-        print(f"Total places fetched: {len(all_results)}")
-        
-        results = []
-        for place in all_results:
-            # Calculate distance using Haversine formula
-            place_lat = place['geometry']['location']['lat']
-            place_lng = place['geometry']['location']['lng']
-            
-            # Haversine formula for distance in km
-            R = 6371  # Earth's radius in km
-            lat1_rad = math.radians(lat)
-            lat2_rad = math.radians(place_lat)
-            delta_lat = math.radians(place_lat - lat)
-            delta_lng = math.radians(place_lng - lng)
-            
-            a = (math.sin(delta_lat / 2) ** 2 + 
-                 math.cos(lat1_rad) * math.cos(lat2_rad) * 
-                 math.sin(delta_lng / 2) ** 2)
-            c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-            distance = R * c
-            
-            # Extract rating safely - convert to float if available
-            rating = place.get('rating')
-            if rating is not None:
-                rating = float(rating)
-            else:
-                rating = 'N/A'
-            
-            result_obj = {
-                "name": str(place.get('name', 'Unknown')),
-                "address": str(place.get('vicinity', 'Address not available')),
-                "dist": float(round(distance, 2)),
-                "rating": rating,
-                "place_id": str(place.get('place_id', '')),
-                "types": place.get('types', []),
-                "lat": float(place_lat),
-                "lng": float(place_lng)
-            }
-            print(f"Result object: {result_obj}")
-            results.append(result_obj)
-        
-        # Sort by distance
-        results.sort(key=lambda x: x['dist'])
-        
-        print(f"Returning {len(results)} places")
-        if results:
-            print(f"Sample result: {results[0]}")
-        return results
-    
-    except requests.exceptions.Timeout:
-        print("Google Places API timeout")
-        return []
-    except requests.exceptions.RequestException as e:
-        print(f"Error calling Google Places API: {str(e)}")
-        return []
-    except Exception as e:
-        print(f"Unexpected error in places search: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return []
+
+            print(f"Calling Google Places API with params: {params}")
+
+            all_results = []
+            page_count = 0
+            max_pages = 3  # Google allows up to 3 pages (60 results)
+
+            while page_count < max_pages:
+                response = requests.get(url, params=params, timeout=10)
+                response.raise_for_status()
+                data = response.json()
+
+                status = data.get('status')
+                print(f"Google API response status: {status}, page {page_count + 1}")
+
+                if status not in ['OK', 'ZERO_RESULTS']:
+                    google_error = data.get('error_message', status)
+                    print(f"Google API error: {google_error}")
+                    break
+
+                all_results.extend(data.get('results', []))
+                page_count += 1
+
+                next_page_token = data.get('next_page_token')
+                if not next_page_token:
+                    break
+
+                # Google requires a short delay before using next_page_token
+                await asyncio.sleep(2)
+                params = {
+                    "pagetoken": next_page_token,
+                    "key": GOOGLE_PLACES_API_KEY
+                }
+
+            if all_results:
+                print(f"Total places fetched from Google: {len(all_results)}")
+
+                results = []
+                for place in all_results:
+                    place_lat = place['geometry']['location']['lat']
+                    place_lng = place['geometry']['location']['lng']
+                    distance = calculate_distance_km(lat, lng, place_lat, place_lng)
+
+                    rating = place.get('rating')
+                    if rating is not None:
+                        rating = float(rating)
+                    else:
+                        rating = 'N/A'
+
+                    result_obj = {
+                        "name": str(place.get('name', 'Unknown')),
+                        "address": str(place.get('vicinity', 'Address not available')),
+                        "dist": float(round(distance, 2)),
+                        "rating": rating,
+                        "place_id": str(place.get('place_id', '')),
+                        "types": place.get('types', []),
+                        "lat": float(place_lat),
+                        "lng": float(place_lng)
+                    }
+                    results.append(result_obj)
+
+                results.sort(key=lambda x: x['dist'])
+                print(f"Returning {len(results)} places from Google")
+                return results
+
+        except requests.exceptions.Timeout:
+            google_error = "Google Places API timeout"
+            print(google_error)
+        except requests.exceptions.RequestException as e:
+            google_error = f"Google Places request error: {str(e)}"
+            print(google_error)
+        except Exception as e:
+            google_error = f"Unexpected Google Places error: {str(e)}"
+            print(google_error)
+    else:
+        google_error = "Google Places API key missing"
+        print(google_error)
+
+    print("Falling back to OSM Overpass for places search")
+    osm_results = search_places_via_osm(lat, lng, keyword)
+    if osm_results:
+        print(f"Returning {len(osm_results)} places from OSM fallback")
+        return osm_results
+
+    if google_error:
+        print(f"Places search failed. Last Google error: {google_error}")
+
+    return []
 
 # --- NEW: Chart Data Endpoints ---
 

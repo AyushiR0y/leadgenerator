@@ -34,7 +34,6 @@ In the Render dashboard, go to your service and add these environment variables:
 **Required:**
 - `MAPPLS_CLIENT_ID` - Your MapmyIndia client ID
 - `MAPPLS_CLIENT_SECRET` - Your MapmyIndia secret
-- `GOOGLE_PLACES_API_KEY` - Your Google Places API key
 - `AZURE_OPENAI_API_KEY` - Your Azure OpenAI key
 - `AZURE_OPENAI_ENDPOINT` - Your Azure OpenAI endpoint
 - `AZURE_OPENAI_DEPLOYMENT_NAME` - Your deployment name
@@ -43,6 +42,7 @@ In the Render dashboard, go to your service and add these environment variables:
 
 **Optional (has default):**
 - `AZURE_OPENAI_API_VERSION` - Already set to `2024-02-15-preview`
+- `GOOGLE_PLACES_API_KEY` - Enables Google Places for nearby business leads; if missing or denied, app falls back to OpenStreetMap data
 
 ### 4. Deploy
 
