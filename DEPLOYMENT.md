@@ -37,12 +37,11 @@ In the Render dashboard, go to your service and add these environment variables:
 - `AZURE_OPENAI_API_KEY` - Your Azure OpenAI key
 - `AZURE_OPENAI_ENDPOINT` - Your Azure OpenAI endpoint
 - `AZURE_OPENAI_DEPLOYMENT_NAME` - Your deployment name
-- `GOOGLE_SEARCH_ENGINE_ID` - Your Google search engine ID
 - `CONTACTOUT_API_KEY` - Your ContactOut API key
 
 **Optional (has default):**
 - `AZURE_OPENAI_API_VERSION` - Already set to `2024-02-15-preview`
-- `GOOGLE_PLACES_API_KEY` - Enables Google Places for nearby business leads; if missing or denied, app falls back to OpenStreetMap data
+- `GOOGLE_PLACES_API_KEY` - Enables Google Places API for nearby business leads; if missing or quota-denied, app automatically falls back to OpenStreetMap data (Bing HTML is used for all web/LinkedIn searches)
 
 ### 4. Deploy
 

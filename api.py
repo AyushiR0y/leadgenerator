@@ -27,8 +27,7 @@ AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
 AZURE_OPENAI_DEPLOYMENT_NAME = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
 
-GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY") 
-GOOGLE_SEARCH_ENGINE_ID = os.getenv("GOOGLE_SEARCH_ENGINE_ID")
+GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY")
 CONTACTOUT_API_KEY = os.getenv("CONTACTOUT_API_KEY")
 
 # --- Data Loading (Global State) ---
@@ -186,6 +185,83 @@ def get_osm_address(tags: Dict[str, Any]) -> str:
     return address if address else tags.get("name", "Address not available")
 
 
+def build_osm_types(tags: Dict[str, Any]) -> List[str]:
+    """Build a compact list of OSM category tags."""
+    return [
+        value
+        for value in [
+            tags.get("amenity"),
+            tags.get("shop"),
+            tags.get("office"),
+            tags.get("leisure"),
+            tags.get("industrial"),
+            tags.get("man_made"),
+            tags.get("craft"),
+        ]
+        if value
+    ]
+
+
+def search_places_via_nominatim(lat: float, lng: float, keyword: str, radius_m: int = 10000, limit: int = 60) -> List[Dict[str, Any]]:
+    """Fallback search using Nominatim when Overpass is rate limited."""
+    try:
+        delta_lat = radius_m / 111320.0
+        delta_lng = radius_m / max(111320.0 * math.cos(math.radians(lat)), 1e-6)
+        left = lng - delta_lng
+        right = lng + delta_lng
+        top = lat + delta_lat
+        bottom = lat - delta_lat
+
+        params = {
+            "q": keyword,
+            "format": "jsonv2",
+            "limit": limit,
+            "viewbox": f"{left},{top},{right},{bottom}",
+            "bounded": 1,
+            "addressdetails": 1,
+        }
+        headers = {
+            "User-Agent": "leadgenerator/1.0 (nearby-business-fallback)",
+        }
+        response = requests.get("https://nominatim.openstreetmap.org/search", params=params, headers=headers, timeout=20)
+        response.raise_for_status()
+        data = response.json()
+    except Exception as error:
+        print(f"Nominatim fallback failed: {str(error)}")
+        return []
+
+    places = []
+    for item in data:
+        place_name = str(item.get("name") or item.get("display_name") or "").strip()
+        if not place_name:
+            continue
+
+        place_lat = item.get("lat")
+        place_lng = item.get("lon")
+        if place_lat is None or place_lng is None:
+            continue
+
+        place_lat = float(place_lat)
+        place_lng = float(place_lng)
+        distance = calculate_distance_km(lat, lng, place_lat, place_lng)
+
+        places.append(
+            {
+                "name": place_name,
+                "address": str(item.get("display_name", "Address not available")),
+                "dist": float(round(distance, 2)),
+                "rating": "N/A",
+                "place_id": f"osm:nominatim:{item.get('place_id', '')}",
+                "types": [str(item.get("type", ""))] if item.get("type") else [],
+                "lat": place_lat,
+                "lng": place_lng,
+            }
+        )
+
+    places.sort(key=lambda item: item["dist"])
+    return places[:limit]
+
+
 def search_places_via_osm(lat: float, lng: float, keyword: str, radius_m: int = 10000, limit: int = 60) -> List[Dict[str, Any]]:
     """Search nearby places using OSM Overpass as fallback when Google Places fails."""
     filters = get_overpass_filters(keyword)
@@ -201,20 +277,37 @@ def search_places_via_osm(lat: float, lng: float, keyword: str, radius_m: int = 
     (
       {''.join(query_blocks)}
     );
-    out center {limit};
+    out center;
     """
 
-    try:
-        response = requests.post(
-            "https://overpass-api.de/api/interpreter",
-            data={"data": overpass_query},
-            timeout=20,
-        )
-        response.raise_for_status()
-        data = response.json()
-    except Exception as error:
-        print(f"OSM Overpass fallback failed: {str(error)}")
-        return []
+    overpass_endpoints = [
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://overpass.private.coffee/api/interpreter",
+    ]
+    headers = {
+        "User-Agent": "leadgenerator/1.0 (nearby-business-fallback)",
+    }
+
+    data = None
+    for endpoint in overpass_endpoints:
+        try:
+            response = requests.post(endpoint, data={"data": overpass_query}, headers=headers, timeout=20)
+
+            if response.status_code == 429:
+                print(f"Overpass rate limited at {endpoint}")
+                continue
+
+            response.raise_for_status()
+            data = response.json()
+            if data.get("elements"):
+                break
+        except Exception as error:
+            print(f"OSM Overpass endpoint failed ({endpoint}): {str(error)}")
+
+    if not data:
+        print("OSM Overpass failed on all endpoints, trying Nominatim fallback")
+        return search_places_via_nominatim(lat, lng, keyword, radius_m=radius_m, limit=limit)
 
     places = []
     for element in data.get("elements", []):
@@ -242,14 +335,18 @@ def search_places_via_osm(lat: float, lng: float, keyword: str, radius_m: int = 
                 "dist": float(round(distance, 2)),
                 "rating": "N/A",
                 "place_id": f"osm:{element.get('type', 'node')}:{element.get('id', '')}",
-                "types": [value for value in [tags.get("amenity"), tags.get("shop"), tags.get("office"), tags.get("leisure"), tags.get("industrial")] if value],
+                "types": build_osm_types(tags),
                 "lat": float(place_lat),
                 "lng": float(place_lng),
             }
         )
 
     places.sort(key=lambda item: item["dist"])
-    return places[:limit]
+    if places:
+        return places[:limit]
+
+    print("OSM Overpass returned no places, trying Nominatim fallback")
+    return search_places_via_nominatim(lat, lng, keyword, radius_m=radius_m, limit=limit)
 def get_demographics_data(district_name, state_name):
     if pca_df is None: return None, "No Data"
     pca_df_copy = pca_df.copy()
@@ -534,58 +631,30 @@ def get_web_context(company_name: str):
             f"{company_name} managing director executives",
         ]
         
-        # Method 1: Google Custom Search API
-        if GOOGLE_PLACES_API_KEY and GOOGLE_SEARCH_ENGINE_ID:
-            for query in search_queries:
-                try:
-                    params = {
-                        'key': GOOGLE_PLACES_API_KEY,
-                        'cx': GOOGLE_SEARCH_ENGINE_ID,
-                        'q': query,
-                        'num': 5
-                    }
-                    response = requests.get(
-                        'https://www.googleapis.com/customsearch/v1',
-                        params=params,
-                        timeout=10
-                    )
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        for item in data.get('items', []):
-                            title = item.get('title', '')
-                            snippet = item.get('snippet', '')
-                            if title and snippet:
-                                collected_snippets.append(f"Source: {title}\nInfo: {snippet}\n")
-                except Exception as e:
-                    print(f"Google search error for '{query}': {e}")
-                    continue
+        # Use Bing HTML search for web context
+        import urllib.parse
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        }
         
-        # Method 2: Fallback to Bing HTML
-        if not collected_snippets:
-            import urllib.parse
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            }
-            
-            for query in search_queries:
-                try:
-                    encoded_query = urllib.parse.quote(query)
-                    url = f"https://www.bing.com/search?q={encoded_query}"
-                    response = requests.get(url, headers=headers, timeout=6)
-                    
-                    if response.status_code == 200:
-                        soup = BeautifulSoup(response.text, 'html.parser')
-                        for result in soup.select('.b_algo')[:5]:
-                            title_elem = result.select_one('h2')
-                            snippet_elem = result.select_one('.b_caption p')
-                            if title_elem and snippet_elem:
-                                title = title_elem.get_text(strip=True)
-                                snippet = snippet_elem.get_text(strip=True)
-                                collected_snippets.append(f"Source: {title}\nInfo: {snippet}\n")
-                except Exception as e:
-                    print(f"Bing search error for '{query}': {e}")
-                    continue
+        for query in search_queries:
+            try:
+                encoded_query = urllib.parse.quote(query)
+                url = f"https://www.bing.com/search?q={encoded_query}"
+                response = requests.get(url, headers=headers, timeout=6)
+                
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    for result in soup.select('.b_algo')[:5]:
+                        title_elem = result.select_one('h2')
+                        snippet_elem = result.select_one('.b_caption p')
+                        if title_elem and snippet_elem:
+                            title = title_elem.get_text(strip=True)
+                            snippet = snippet_elem.get_text(strip=True)
+                            collected_snippets.append(f"Source: {title}\nInfo: {snippet}\n")
+            except Exception as e:
+                print(f"Bing search error for '{query}': {e}")
+                continue
         
         if collected_snippets:
             context_text = "\n--- Search Results ---\n" + "\n".join(collected_snippets[:8])
@@ -1230,36 +1299,7 @@ def search_linkedin_via_web(name: str, company: str = '') -> str:
     query_parts.append("LinkedIn")
     query = " ".join(query_parts)
     
-    # Method 1: Google Custom Search API (most reliable)
-    if GOOGLE_PLACES_API_KEY and GOOGLE_SEARCH_ENGINE_ID:
-        try:
-            params = {
-                'key': GOOGLE_PLACES_API_KEY,
-                'cx': GOOGLE_SEARCH_ENGINE_ID,
-                'q': f'site:linkedin.com/in {query}',
-                'num': 5
-            }
-            response = requests.get(
-                'https://www.googleapis.com/customsearch/v1',
-                params=params,
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                items = data.get('items', [])
-                for item in items:
-                    link = item.get('link', '')
-                    linkedin_url = extract_linkedin_url(link)
-                    if linkedin_url:
-                        print(f"  Google found: {linkedin_url}")
-                        return linkedin_url
-            else:
-                print(f"  Google Custom Search error: {response.status_code} - {response.text[:200]}")
-        except Exception as e:
-            print(f"  Google Custom Search failed: {e}")
-    
-    # Method 2: Fallback to Bing HTML (if Google not configured)
+    # Use Bing HTML search for LinkedIn profiles
     try:
         import urllib.parse
         headers = {
